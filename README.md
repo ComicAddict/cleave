@@ -120,6 +120,9 @@ sudo make install MLPACK=1
 # Run the built-in benchmark on your file (serial vs parallel)
 ./cleave cloud.ply --benchmark
 
+# Reproducible run — same output every time
+./cleave cloud.ply out.ply --seed 42
+
 # Run the synthetic scaling benchmark (no input needed)
 ./cleave --benchmark
 ```
@@ -168,6 +171,10 @@ sudo make install MLPACK=1
                                  scalar integer. Useful for analysing tree balance.
 
                       all        Shorthand for leaf,hierarchy,top-down,depth
+
+--seed <n>          RNG seed for reproducible results (default: random)
+                    When set, every run with the same --seed and --workers
+                    produces identical output. See Cluster consistency below.
 
 --benchmark         Run a serial-vs-parallel timing comparison on the input file
                     instead of writing output. Useful for tuning --workers and
@@ -224,6 +231,45 @@ The `--threshold` value is the smallest eigenvalue of the 3×3 PCA covariance of
 - The **right threshold** depends on your point density and the scale of features you care about
 
 A practical approach is to start with the default `0.02` and look at the result in CloudCompare, then halve or double the threshold until the cluster granularity matches what you need.
+
+## Cluster consistency
+
+K-Means is not a deterministic algorithm — it starts from randomly chosen initial centroids and converges to a local minimum of the inertia objective. Different initialisations can produce different valid clusterings with similar quality, so results will vary between runs unless a seed is fixed.
+
+### Relationship to scikit-learn
+
+Cleave uses **Elkan's algorithm**, which is the same method scikit-learn uses by default for low-dimensional data (since v0.24). Both minimise the same objective (total squared distance from each point to its assigned centroid) and apply the same triangle-inequality shortcut. The algorithm is mathematically identical to Lloyd's algorithm — Elkan only skips distance computations that cannot change the outcome, so assignments are exact, not approximate.
+
+Results will still differ from scikit-learn run to run because of different random initialisations, a different number of restarts (`n_init = 2` in Cleave vs `10` in sklearn by default), and a slightly different convergence criterion. The clustering quality should be comparable.
+
+### Making results reproducible
+
+Pass `--seed` with any positive integer:
+
+```bash
+cleave cloud.ply out.ply --seed 42
+```
+
+The same seed produces identical output across repeated runs. This is useful for comparing the effect of different `--threshold` or `--max-k` values on the same initialisation:
+
+```bash
+cleave cloud.ply a.ply --seed 42 --threshold 0.01
+cleave cloud.ply b.ply --seed 42 --threshold 0.05
+```
+
+### Seed and parallelism
+
+When using multiple threads, reproducibility also requires fixing `--workers`. With parallel execution, different threads race to pick up tasks, and the thread that processes a given cluster determines which RNG stream is used for its K-Means initialisation. Fixing both seed and worker count guarantees identical output:
+
+```bash
+cleave cloud.ply out.ply --seed 42 --workers 4
+```
+
+For fully deterministic results regardless of scheduling, use `--workers 1`:
+
+```bash
+cleave cloud.ply out.ply --seed 42 --workers 1
+```
 
 ## License
 
