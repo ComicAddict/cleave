@@ -98,7 +98,7 @@ struct Config {
     // Typical cluster sizes depend on your data; 2000 is safe for most cases.
     int   serial_cutoff        = 2000;
     int   kmeans_max_iter      = 100;
-    int   kmeans_n_init        = 2;
+    int   kmeans_n_init        = 3;
     int   max_depth            = 15;
     int   n_workers            = static_cast<int>(std::thread::hardware_concurrency());
     int   bench_repeats        = 3;
@@ -1384,20 +1384,53 @@ int main(int argc, char* argv[]) {
         std::cerr << "Error: --workers must be >= 1.\n"; return 1;
     }
 
-    // ── Synthetic benchmark mode (no input file) ──────────────────
+    // ── No input file: show info screen ─────────────────────────
     if (in_path.empty()) {
-        std::cout << "\nNo file provided — running benchmark on synthetic data.\n";
-        std::cout << "Variants: Serial+Naive, Serial+ElkanAVX, Parallel+ElkanAVX";
+        // --benchmark with no file runs the synthetic benchmark
+        if (do_benchmark) {
+            std::cout << "\nRunning synthetic benchmark "
+                         "(Serial+Naive, Serial+ElkanAVX, Parallel+ElkanAVX";
 #ifdef WITH_MLPACK
-        std::cout << ", Serial+mlpack, Parallel+mlpack";
+            std::cout << ", Serial+mlpack, Parallel+mlpack";
 #else
-        std::cout << "\n(Build with -DWITH_MLPACK to add mlpack variants)";
+            std::cout << "; build with -DWITH_MLPACK for mlpack variants";
 #endif
-        std::cout << "\n";
-        for (int n : {5000, 20000, 100000}) {
-            auto pts = generate_synthetic(n);
-            run_benchmark(pts, cfg);
+            std::cout << ")\n";
+            for (int n : {5000, 20000, 100000}) {
+                auto pts = generate_synthetic(n);
+                run_benchmark(pts, cfg);
+            }
+            return 0;
         }
+
+        // Default: info screen
+        std::cout <<
+            "\n"
+            "  ██████╗ ██╗     ███████╗ █████╗ ██╗   ██╗███████╗\n"
+            "  ██╔════╝██║     ██╔════╝██╔══██╗██║   ██║██╔════╝\n"
+            "  ██║     ██║     █████╗  ███████║██║   ██║█████╗  \n"
+            "  ██║     ██║     ██╔══╝  ██╔══██║╚██╗ ██╔╝██╔══╝  \n"
+            "  ╚██████╗███████╗███████╗██║  ██║ ╚████╔╝ ███████╗\n"
+            "   ╚═════╝╚══════╝╚══════╝╚═╝  ╚═╝  ╚═══╝  ╚══════╝\n"
+            "\n"
+            "  Divisive K-Means clustering for 3D point clouds\n"
+            "\n"
+            "  Cleave recursively splits a point cloud into surface patches,\n"
+            "  stopping when each cluster is geometrically flat — measured by\n"
+            "  the smallest eigenvalue of its local PCA covariance. The result\n"
+            "  is a tree of clusters exported as a PLY with per-vertex hierarchy\n"
+            "  attributes at every level, from leaf to root.\n"
+            "\n"
+            "  Algorithm  : Divisive K-Means with Elkan + AVX2 acceleration\n"
+            "  K selection: Knee method (second derivative of inertia curve)\n"
+            "  Stop cond  : PCA smallest eigenvalue < threshold\n"
+            "  Output     : Binary PLY with cluster_id_leaf_N / depth_N attrs\n"
+            "\n"
+            "  Usage:\n"
+            "    cleave <input.ply> [output.ply] [options]\n"
+            "    cleave --help      Full option reference\n"
+            "    cleave --benchmark Run synthetic scaling benchmark\n"
+            "\n";
         return 0;
     }
 

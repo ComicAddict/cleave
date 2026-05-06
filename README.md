@@ -121,7 +121,7 @@ sudo make install MLPACK=1
 ./cleave cloud.ply --benchmark
 
 # Run the synthetic scaling benchmark (no input needed)
-./cleave
+./cleave --benchmark
 ```
 
 ## Options
