@@ -98,17 +98,43 @@ struct Config {
     // Typical cluster sizes depend on your data; 2000 is safe for most cases.
     int   serial_cutoff        = 2000;
     int   kmeans_max_iter      = 100;
-    int   kmeans_n_init        = 3;
+    int   kmeans_n_init        = 2;
     int   max_depth            = 15;
-    int   n_workers            = static_cast<int>(std::thread::hardware_concurrency());
-    int   bench_repeats        = 3;
+    int      n_workers         = static_cast<int>(std::thread::hardware_concurrency());
+    int      bench_repeats     = 3;
+    uint64_t seed              = 0;   // 0 = non-deterministic
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Thread-local RNG — no locking, no contention
+// RNG — one mt19937 per thread, no locking, no contention.
+//
+// When a seed is provided (--seed N), every thread is seeded deterministically
+// as (seed + thread_index). This gives reproducible results independent of
+// thread count as long as --workers is fixed.
+//
+// When no seed is provided, each thread seeds from std::random_device,
+// giving non-deterministic (but independent) streams.
+//
+// tl_rng is initialised lazily on first use.  seed_rng() is called once per
+// thread by the ThreadPool constructor (or by main for the serial path).
 // ─────────────────────────────────────────────────────────────────────────────
 
-thread_local std::mt19937 tl_rng(std::random_device{}());
+static std::atomic<uint64_t> g_base_seed{0};   // 0 = use random_device
+static std::atomic<int>       g_thread_idx{0};  // incremented per thread
+
+thread_local std::mt19937 tl_rng(std::random_device{}());  // default; overridden below
+
+static void seed_this_thread() {
+    uint64_t base = g_base_seed.load();
+    if (base == 0) {
+        // No seed set — use a fresh random_device draw per thread
+        tl_rng.seed(std::random_device{}());
+    } else {
+        // Deterministic: thread 0 gets base, thread 1 gets base+1, etc.
+        int idx = g_thread_idx.fetch_add(1);
+        tl_rng.seed(static_cast<uint32_t>(base + static_cast<uint64_t>(idx)));
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Work-stealing thread pool
@@ -120,7 +146,10 @@ class ThreadPool {
 public:
     explicit ThreadPool(int n) : stop_(false), active_(0) {
         for (int i = 0; i < n; ++i)
-            workers_.emplace_back([this]{ loop(); });
+            workers_.emplace_back([this]{
+                seed_this_thread();   // seed before any work begins
+                loop();
+            });
     }
     ~ThreadPool() {
         { std::unique_lock<std::mutex> lk(m_); stop_ = true; }
@@ -1233,6 +1262,9 @@ static void print_usage(const char* prog) {
         "  --max-depth <n>   Maximum recursion depth (default: 15)\n"
         "  --workers <n>     Thread count, 1 = serial (default: all cores)\n"
         "  --serial-cutoff <n> Clusters below this size run serially (default: 2000)\n"
+        "  --seed <n>          RNG seed for reproducible results (default: random)\n"
+        "                    Results are reproducible when --seed and --workers\n"
+        "                    are both fixed between runs.\n"
         "  --export <list>   Comma-separated list of attributes to write (default: leaf)\n"
         "                      leaf      — cluster_id_leaf_0 (leaf id, finest)\n"
         "                      hierarchy — cluster_id_leaf_1 … _N (up to root)\n"
@@ -1327,6 +1359,20 @@ int main(int argc, char* argv[]) {
         if (parse_int  (argc, argv, i, "--max-depth",    cfg.max_depth))           continue;
         if (parse_int  (argc, argv, i, "--workers",      cfg.n_workers))           continue;
         if (parse_int  (argc, argv, i, "--serial-cutoff",cfg.serial_cutoff))       continue;
+
+        if (arg == "--seed") {
+            if (i+1 >= argc) { std::cerr << "Error: --seed requires a value.\n"; return 1; }
+            try {
+                long long v = std::stoll(argv[++i]);
+                if (v < 0) throw std::invalid_argument("negative");
+                cfg.seed = static_cast<uint64_t>(v);
+            } catch (...) {
+                std::cerr << "Error: --seed value must be a non-negative integer, got: "
+                          << argv[i] << "\n";
+                return 1;
+            }
+            continue;
+        }
 
         if (arg == "--export") {
             if (i+1 >= argc) { std::cerr << "Error: --export requires a value.\n"; return 1; }
@@ -1459,6 +1505,9 @@ int main(int argc, char* argv[]) {
     std::cout << "Max-depth     : " << cfg.max_depth << "\n";
     std::cout << "Workers       : " << cfg.n_workers << "\n";
     std::cout << "Serial cutoff : " << cfg.serial_cutoff << "\n";
+    std::cout << "Seed          : "
+              << (cfg.seed == 0 ? "random (non-deterministic)" : std::to_string(cfg.seed))
+              << "\n";
     std::cout << "Export        : "
               << (exp_flags.leaf      ? "leaf "      : "")
               << (exp_flags.hierarchy ? "hierarchy " : "")
@@ -1469,9 +1518,17 @@ int main(int argc, char* argv[]) {
 
     // ── Benchmark mode on real file ───────────────────────────────
     if (do_benchmark) {
+        g_base_seed.store(cfg.seed);
+        g_thread_idx.store(0);
+        seed_this_thread();
         run_benchmark(pts, cfg);
         return 0;
     }
+
+    // ── Seed RNG ─────────────────────────────────────────────────
+    g_base_seed.store(cfg.seed);
+    g_thread_idx.store(0);
+    seed_this_thread();   // seed the main thread (serial path / knee search)
 
     // ── Normal clustering ─────────────────────────────────────────
     auto t0 = Clock::now();
